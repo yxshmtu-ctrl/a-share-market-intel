@@ -1,0 +1,11 @@
+pandas>=2.0
+numpy>=1.24
+requests>=2.31
+PyYAML>=6.0
+akshare>=1.20
+# Optional: Tushare Pro token-based data source for cross-checks
+# tushare>=1.4
+
+python-docx>=1.1
+beautifulsoup4>=4.12
+lxml>=5.0
