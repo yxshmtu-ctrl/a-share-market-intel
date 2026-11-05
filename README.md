@@ -2,11 +2,14 @@
 
 **触发词：股神、来财、旺仔**；也可直接说“A股日报/盘前简报/个股持仓/选股”。
 
-本 SKILL 面向 A 股研究/咨询场景，提供三类能力：
+本 SKILL 面向 A 股研究/咨询场景，提供四类能力：
 
-1. **每日市场简报**：国际国内影响市场的热门事件、海外市场/大宗/汇率、今日与近 3 日资金流。
-2. **个股机构与资金画像**：实时行情、今日/3 日资金流、北向/外资、前十大流通股东、社保/QFII 线索、近期新闻。
-3. **策略候选池**：按配置的趋势+资金+流动性规则筛选候选股票，输出评分与入选理由。
+1. **每日市场简报**：国际国内影响市场的热门事件、消息面雷达、海外市场/大宗/汇率、今日与近 3 日资金流。
+2. **实时消息面雷达**：东财全球、华尔街见闻、财联社多源聚合，跨源共振、S/A 级消息、板块映射；支持每 60 秒滚动监控。
+3. **个股机构与资金画像**：实时行情、今日/3 日资金流、北向/外资、前十大流通股东、社保/QFII 线索、近期新闻。
+4. **策略候选池**：按配置的趋势+资金+流动性规则筛选候选股票，输出评分与入选理由。
+
+> 消息面雷达的多源监控与跨源共振思路参考 [hipcityreg/situation-monitor](https://github.com/hipcityreg/situation-monitor)。
 
 > 仅供研究参考，不构成投资建议，不承诺收益。数据来自公开接口，存在延迟、缺失和口径差异。
 
@@ -23,11 +26,31 @@ pip install -r requirements.txt
 pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 ```
 
+### 补充数据层：a-stock-data
+
+已集成 [simonlin1212/a-stock-data](https://github.com/simonlin1212/a-stock-data)（Apache-2.0，87 个直连端点）：
+
+- 安装位置：`~/.opencode/skills/a-stock-data/`
+- 桥接模块：`scripts/astock_data.py`
+- 自检：
+
+```bash
+python scripts/astock_data.py --self-test
+```
+
+封装能力：实时行情（含 PE/PB/市值/换手）、K 线、个股今日/120 日资金流、个股资金流排名（今日/3日）、行业/概念/地域板块资金流、个股新闻、财联社电报。腾讯/东财/财联社直连，免 key；东财已内置限流。资金流优先走 a-stock-data，失败再回退 AKShare。
+
 ## 快速开始
 
 ```bash
-# 每日简报
+# 每日简报（含消息面雷达）
 python scripts/market_brief.py --json
+
+# 只跑消息面雷达（单次）
+python scripts/news_radar.py --once
+
+# 实时滚动，只看新增消息
+python scripts/news_radar.py --watch 60
 
 # 指定截止时间（默认=运行时刻）
 python scripts/market_brief.py --as-of "2026-10-30 09:00" --json
@@ -48,14 +71,15 @@ python scripts/screen.py --config config.yaml --top 10 --json
 
 | 数据 | 来源 | 口径/限制 |
 |---|---|---|
-| 实时行情 | 腾讯 `qt.gtimg.cn` | 盘中快照，可能延迟数秒至数分钟 |
-| 日 K/均线 | 腾讯前复权 K 线 | 用于 MA20/MA60、20 日涨幅、量比 |
-| 今日/3 日资金流 | AKShare `stock_fund_flow_individual` | 同花顺统计口径；不等于真实机构成交 |
+| 实时行情 | 腾讯 `qt.gtimg.cn` + a-stock-data `tencent_quote` | 盘中快照；补充 PE/PB/市值/换手/涨跌停 |
+| 日 K/均线 | 腾讯前复权 K 线 + a-stock-data `tencent_kline` | 用于 MA20/MA60、20 日涨幅、量比 |
+| 个股资金流 | a-stock-data（东财 push2 / push2his）优先，AKShare 兜底 | 算法统计；不等于真实机构成交 |
+| 板块资金流 | a-stock-data `board_fund_flow` | 行业/概念/地域 × 今日/5日/10日 |
 | 北向持股 | AKShare `stock_hsgt_individual_em` | **2024-08 后每日持股数据停止/滞后**；仅作历史参考 |
 | 十大流通股东 | `stock_gdfx_free_top_10_em`，失败回退 `stock_circulate_stock_holder` | 季度披露，滞后 |
 | 社保/QFII | `stock_gdfx_free_holding_teamwork_em` | 协同持股列表；`--deep` 启用，较慢 |
-| 新闻 | 财联社、生意社、韭研公社、巨潮资讯、开盘啦、东方财富 | 公开资讯，去重后按 S/A/B/C 影响级别排序 |
-| 龙虎榜/公告 | `stock_lhb_detail_em` / `stock_notice_report` | 可选扩展 |
+| 新闻 | 财联社、生意社、韭研公社、巨潮资讯、开盘啦、东方财富 + a-stock-data `cls_telegraph` | 公开资讯，去重后按 S/A/B/C 影响级别排序 |
+| 龙虎榜/公告 | `stock_lhb_detail_em` / `stock_notice_report`；a-stock-data `dragon_tiger_board` | 可选扩展 |
 
 ### 资讯影响分级
 

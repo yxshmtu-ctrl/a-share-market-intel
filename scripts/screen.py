@@ -29,6 +29,11 @@ from common import (
 )
 from docx_export import save_to_desktop
 
+try:
+    from astock_data import individual_flow_rank
+except Exception:
+    individual_flow_rank = None
+
 DEFAULT = {
     "strategy": {
         "include_prefixes": ["60", "000", "001", "002", "003", "300", "301"],
@@ -87,6 +92,37 @@ def _pick(df, names, idx=None):
 
 
 def flow_tables() -> pd.DataFrame:
+    if individual_flow_rank:
+        try:
+            today_rows = individual_flow_rank("today", 300, "in")
+            three_rows = individual_flow_rank("3d", 300, "in")
+            if today_rows:
+                t = pd.DataFrame(today_rows)
+                t["code"] = t["code"].astype(str).str.zfill(6)
+                t["name"] = t["name"].astype(str)
+                t["pct"] = pd.to_numeric(t.get("change_pct"), errors="coerce")
+                t["net_today"] = pd.to_numeric(t.get("main_net"), errors="coerce")
+                cols = ["code", "name", "pct", "net_today"]
+                if three_rows:
+                    th = pd.DataFrame(three_rows)
+                    th["code"] = th["code"].astype(str).str.zfill(6)
+                    th = th[["code", "main_net", "change_pct"]].rename(
+                        columns={"main_net": "net_3d", "change_pct": "pct_3d"}
+                    )
+                    t = t.merge(th, on="code", how="left")
+                else:
+                    t["net_3d"] = 0.0
+                    t["pct_3d"] = float("nan")
+                cols += ["net_3d", "pct_3d"]
+                t = t[cols].drop_duplicates("code")
+                try:
+                    t.to_csv(CACHE / "flow_tables.csv", index=False, encoding="utf-8-sig")
+                except Exception:
+                    pass
+                return t
+        except Exception:
+            pass
+
     ak = __import__("akshare")
     today = safe_ak(
         "stock_fund_flow_individual",
@@ -163,8 +199,10 @@ def foreign_hits(code: str, cache: dict) -> list[str]:
         "stock_circulate_stock_holder",
         lambda: ak.stock_circulate_stock_holder(symbol=code),
     )
+    if df is None:
+        return None
     hits = []
-    if df is not None and not df.empty:
+    if not df.empty:
         name_col = _pick(df, ["股东名称"], 3)
         if name_col:
             for n in df[name_col].astype(str).unique():
@@ -278,11 +316,14 @@ def main():
     rows = []
     for x in prelim[: int(cfg["foreign_check_limit"])]:
         hits = foreign_hits(x["code"], foreign_cache)
-        if hits:
-            x["score"] += 15
-            x["reasons"].append("外资/合格机构" + "、".join(hits[:2]))
-        if cfg.get("require_foreign") and not hits:
-            continue
+        if hits is None:
+            x["reasons"].append("外资持仓未取得（数据源异常）")
+        else:
+            if hits:
+                x["score"] += 15
+                x["reasons"].append("外资/合格机构" + "、".join(hits[:2]))
+            if cfg.get("require_foreign") and not hits:
+                continue
         if x["score"] < cfg.get("min_score", 60):
             continue
         rows.append(x)

@@ -37,14 +37,29 @@ description: |
 
 | 数据 | 主要来源 | 口径/限制 |
 |---|---|---|
-| 实时行情 | 腾讯行情 `qt.gtimg.cn` | 盘中快照，可能延迟数秒至数分钟 |
-| 日K/均线 | 腾讯前复权K线 | 用于趋势/量比，不复权口径需注明 |
-| 今日/3日资金流 | AKShare `stock_fund_flow_individual`（同花顺口径） | 算法统计，不等于真实机构买卖 |
+| 实时行情 | 腾讯行情 `qt.gtimg.cn` + **a-stock-data `tencent_quote`**（PE/PB/市值/换手/涨跌停） | 盘中快照，可能延迟数秒至数分钟 |
+| 日K/均线 | 腾讯前复权K线 + **a-stock-data `tencent_kline`** | 用于趋势/量比，不复权口径需注明 |
+| 个股资金流 | **a-stock-data**（东财 push2 分钟级 / push2his 120日）优先；AKShare 兜底 | 算法统计，不等于真实机构买卖 |
+| 板块资金流 | **a-stock-data `board_fund_flow`**（东财） | 行业/概念/地域 × 今日/5日/10日 |
 | 北向持股 | AKShare `stock_hsgt_individual_em` | **2024-08后每日持股数据停止/滞后**，只能作历史参考 |
 | 十大流通股东 | AKShare `stock_gdfx_free_top_10_em`，失败时回退 `stock_circulate_stock_holder` | 季度披露，滞后 |
 | 社保/QFII | AKShare `stock_gdfx_free_holding_teamwork_em` | 协同持股列表，需按代码匹配；较慢，`--deep` 启用 |
-| 新闻 | 财联社、生意社、韭研公社、巨潮资讯、开盘啦、东方财富 | 公开资讯，去重后按 S/A/B/C 影响级别排序；不代表价格方向 |
-| 公告/龙虎榜 | AKShare `stock_lhb_detail_em` / `stock_notice_report` | 可选，按需调用 |
+| 新闻 | 财联社、生意社、韭研公社、巨潮资讯、开盘啦、东方财富 + **a-stock-data `cls_telegraph`** | 公开资讯，去重后按 S/A/B/C 影响级别排序；不代表价格方向 |
+| 公告/龙虎榜 | AKShare `stock_lhb_detail_em` / `stock_notice_report`；**a-stock-data `dragon_tiger_board`** 可补充席位 | 可选，按需调用 |
+
+### a-stock-data 集成（优先使用）
+
+本项目已把 [simonlin1212/a-stock-data](https://github.com/simonlin1212/a-stock-data)（Apache-2.0，87 个直连端点）作为补充数据层：
+
+- 上游技能：`~/.opencode/skills/a-stock-data/SKILL.md`
+- 本项目的桥接：`scripts/astock_data.py`
+- 自检：`python scripts/astock_data.py --self-test`
+- 已封装：`quote()`、`kline()`、`fund_flow_today()`、`fund_flow_days()`、`board_flow_top()`、`individual_flow_rank()`、`stock_news()`、`telegraph()`
+- 特点：腾讯/东财/财联社直连，免 key；东财请求自动限流，主源失败可换备用源
+- 口径：资金流为东财算法统计，不等于机构真实成交；板块资金流只有今日/5日/10日，个股排名支持今日/3日
+- 细节与字段见 [references/data_sources.md](references/data_sources.md)
+
+**调用顺序**：先用 a-stock-data 的直连端点；失败或字段缺失时回退 AKShare；两者都失败才写“未取得”。
 
 **强制规则**：
 - 任何数字都要带来源与时间；不要把季度持仓写成“今天买入”。
@@ -60,6 +75,12 @@ description: |
 pip install -r requirements.txt
 ```
 
+数据层自检（a-stock-data 直连是否可用）：
+
+```bash
+python scripts/astock_data.py --self-test
+```
+
 ### 1. 每日/盘中市场简报
 
 ```bash
@@ -70,9 +91,33 @@ python scripts/market_brief.py --as-of "2026-10-30 09:00" --json
 
 输出：`output/daily_brief_YYYY-MM-DD.md`（及 JSON），并自动生成桌面 Word：`A股市场情报简报_YYYY-MM-DD.docx`。包含：
 - 今日核心事件（按 S/A/B/C 影响级别排序，附关键词倾向与标签）
+- 消息面雷达：跨源共振、S/A 级消息、板块映射（东财全球 / 华尔街见闻 / 财联社）
 - 海外市场/大宗/汇率快照
-- 今日与近3日主力净流入/流出
+- 行业板块今日/近5日主力净流入/流出（a-stock-data）
+- 个股今日/近3日主力净流入（a-stock-data 优先，AKShare 兜底）
 - 对A股的可能影响与风险提示（由模型结合事件补全）
+
+### 1.1 实时消息面雷达（信息差）
+
+不跑整份简报、只看消息面时：
+
+```bash
+# 单次快照（写入 output/news_radar_YYYY-MM-DD.md）
+python scripts/news_radar.py --once
+
+# 每 60 秒滚动，只打印新增消息（Ctrl+C 停止）
+python scripts/news_radar.py --watch 60
+
+# 结构化 JSON
+python scripts/news_radar.py --once --json
+```
+
+数据源：东财全球 7×24、华尔街见闻（global + A股频道）、财联社电报。输出：
+- **跨源共振**：同一主题被 ≥2 个独立来源提及，按来源数与级别排序
+- **S/A 级消息**：宏观、政策、地缘、行业催化
+- **板块映射**：AI算力、半导体、新能源、军工、有色、医药、消费、地产、大金融等
+
+缓存 10 分钟，网络慢时优先用缓存；单源失败不影响其他源。
 
 ### 2. 个股情报
 

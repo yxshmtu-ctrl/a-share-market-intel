@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import time
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 from common import (
+    CACHE,
     OUTPUT,
     bare_code,
     fmt_money,
@@ -22,6 +24,11 @@ from common import (
     safe_ak,
     tencent_quotes,
 )
+
+try:
+    from astock_data import fund_flow_days, fund_flow_today, quote as astock_quote
+except Exception:
+    fund_flow_days = fund_flow_today = astock_quote = None
 
 
 def _ak():
@@ -39,41 +46,99 @@ def _pick(df, names):
 
 def get_quote(code: str) -> dict:
     q = tencent_quotes([code]).get(bare_code(code), {})
+    if astock_quote and q:
+        try:
+            extra = astock_quote([bare_code(code)]).get(bare_code(code), {})
+            for key in (
+                "pe_ttm",
+                "pe_static",
+                "pb",
+                "mcap_yi",
+                "float_mcap_yi",
+                "turnover_pct",
+                "vol_ratio",
+                "limit_up",
+                "limit_down",
+                "is_stale",
+            ):
+                if extra.get(key) is not None:
+                    q[key] = extra[key]
+        except Exception:
+            pass
     return q or {}
 
 
 def get_fund_flow(code: str) -> dict:
-    ak = _ak()
     bare = bare_code(code)
     out = {"today": None, "three_day": None}
-    today = safe_ak(
-        "stock_fund_flow_individual",
-        lambda: ak.stock_fund_flow_individual(symbol="即时"),
-    )
-    if today is not None and not today.empty:
-        c = _pick(today, ["股票代码", "代码"]) or today.columns[1]
-        row = today[today[c].astype(str).str.zfill(6) == bare]
-        if not row.empty:
-            r = row.iloc[0]
-            out["today"] = {
-                "net": fmt_money(parse_cn_money(r.get("净额", r.iloc[8]))),
-                "pct": str(r.get("涨跌幅", r.iloc[4])),
-                "turnover": str(r.get("换手率", r.iloc[5])),
-            }
-    three = safe_ak(
-        "stock_fund_flow_individual",
-        lambda: ak.stock_fund_flow_individual(symbol="3日排行"),
-    )
-    if three is not None and not three.empty:
-        c = _pick(three, ["股票代码", "代码"]) or three.columns[1]
-        row = three[three[c].astype(str).str.zfill(6) == bare]
-        if not row.empty:
-            r = row.iloc[0]
-            out["three_day"] = {
-                "net": fmt_money(parse_cn_money(r.get("资金净流入", r.iloc[6]))),
-                "pct": str(r.get("阶段涨跌幅", r.iloc[4])),
-                "turnover": str(r.get("阶段换手率", r.iloc[5])),
-            }
+
+    if fund_flow_today:
+        try:
+            t = fund_flow_today(bare)
+            if t:
+                q = tencent_quotes([code]).get(bare, {})
+                pct = q.get("pct")
+                turn = q.get("turnover")
+                out["today"] = {
+                    "net": t["net_fmt"],
+                    "pct": f"{pct:+.2f}%" if isinstance(pct, (int, float)) else "—",
+                    "turnover": f"{turn:.2f}%"
+                    if isinstance(turn, (int, float))
+                    else "—",
+                    "source": t.get("source", "eastmoney-push2"),
+                }
+        except Exception:
+            pass
+
+    if fund_flow_days:
+        try:
+            d = fund_flow_days(bare, 3)
+            if d:
+                out["three_day"] = {
+                    "net": d["net_fmt"],
+                    "pct": "—",
+                    "turnover": "—",
+                    "source": d.get("source", "eastmoney-push2his"),
+                }
+        except Exception:
+            pass
+
+    if not out["today"] or not out["three_day"]:
+        ak = _ak()
+
+    if not out["today"]:
+        today = safe_ak(
+            "stock_fund_flow_individual",
+            lambda: ak.stock_fund_flow_individual(symbol="即时"),
+        )
+        if today is not None and not today.empty:
+            c = _pick(today, ["股票代码", "代码"]) or today.columns[1]
+            row = today[today[c].astype(str).str.zfill(6) == bare]
+            if not row.empty:
+                r = row.iloc[0]
+                out["today"] = {
+                    "net": fmt_money(parse_cn_money(r.get("净额", r.iloc[8]))),
+                    "pct": str(r.get("涨跌幅", r.iloc[4])),
+                    "turnover": str(r.get("换手率", r.iloc[5])),
+                    "source": "akshare",
+                }
+
+    if not out["three_day"]:
+        three = safe_ak(
+            "stock_fund_flow_individual",
+            lambda: ak.stock_fund_flow_individual(symbol="3日排行"),
+        )
+        if three is not None and not three.empty:
+            c = _pick(three, ["股票代码", "代码"]) or three.columns[1]
+            row = three[three[c].astype(str).str.zfill(6) == bare]
+            if not row.empty:
+                r = row.iloc[0]
+                out["three_day"] = {
+                    "net": fmt_money(parse_cn_money(r.get("资金净流入", r.iloc[6]))),
+                    "pct": str(r.get("阶段涨跌幅", r.iloc[4])),
+                    "turnover": str(r.get("阶段换手率", r.iloc[5])),
+                    "source": "akshare",
+                }
     return out
 
 
@@ -166,6 +231,59 @@ def get_top10(code: str) -> tuple[list[dict], str | None]:
     return [], None
 
 
+def _team_table(label: str, cache_hours: float = 12):
+    """社保/QFII 协同持股全表，带本地缓存（接口很慢，一次约 1 分钟）。"""
+    path = CACHE / f"team_{label}.pkl"
+    try:
+        if path.exists() and time.time() - path.stat().st_mtime < cache_hours * 3600:
+            return pd.read_pickle(path)
+    except Exception:
+        pass
+    ak = _ak()
+    df = safe_ak(
+        "stock_gdfx_free_holding_teamwork_em",
+        lambda: ak.stock_gdfx_free_holding_teamwork_em(symbol=label),
+    )
+    if df is not None and not df.empty:
+        try:
+            df.to_pickle(path)
+        except Exception:
+            pass
+    return df
+
+
+def get_team_holdings(code: str, cache_hours: float = 12) -> dict:
+    """匹配社保/QFII 协同持股列表。
+
+    该接口返回的是“每个机构产品 + 其前十大重仓股”的列表，持股明细写成
+    ``代码|名称|报告期`` 逐条拼接，因此只能按代码扫描。单只产品只披露前十大，
+    未匹配到不代表未持有。
+    """
+    bare = bare_code(code)
+    out: dict[str, list[str]] = {}
+    for label in ("社保", "QFII"):
+        best: dict[str, str] = {}
+        df = _team_table(label, cache_hours=cache_hours)
+        if df is not None and not df.empty:
+            name_col = _pick(df, ["股东名称"])
+            detail_col = _pick(df, ["持股详情", "个股详情"]) or df.columns[-1]
+            if name_col:
+                for _, r in df.iterrows():
+                    fund = str(r.get(name_col, "")).strip()
+                    detail = str(r.get(detail_col, ""))
+                    if not fund or bare not in detail:
+                        continue
+                    for item in detail.split(","):
+                        parts = item.split("|")
+                        if len(parts) >= 3 and parts[0].strip() == bare:
+                            period = parts[2].strip()
+                            if period > best.get(fund, ""):
+                                best[fund] = period
+        ranked = sorted(best.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)
+        out[label] = [f"{fund}（{period}）" for fund, period in ranked]
+    return out
+
+
 def get_news(code: str) -> list[dict]:
     ak = _ak()
     df = safe_ak("stock_news_em", lambda: ak.stock_news_em(symbol=bare_code(code)))
@@ -204,6 +322,11 @@ def render(
         f"- 成交额：{fmt_money(quote.get('amount'))}；换手率：{quote.get('turnover', '—')}%",
         "\n## 二、近 3 日资金流",
     ]
+    if quote.get("pe_ttm") is not None or quote.get("pb") is not None:
+        lines.insert(
+            6,
+            f"- PE(TTM)：{quote.get('pe_ttm', '—')}；PB：{quote.get('pb', '—')}；总市值：{quote.get('mcap_yi', '—')}亿",
+        )
     if flow.get("today"):
         lines.append(
             f"- 今日主力净额：{flow['today']['net']}；涨跌幅：{flow['today']['pct']}；换手率：{flow['today']['turnover']}"
@@ -241,9 +364,16 @@ def render(
     if team:
         for label in ("社保", "QFII"):
             if team.get(label):
-                lines.append(f"- {label}：{'；'.join(team[label])}")
+                items = team[label]
+                shown = "；".join(items[:8])
+                if len(items) > 8:
+                    shown += f" 等 {len(items)} 只"
+                lines.append(f"- {label}：{shown}")
             else:
-                lines.append(f"- {label}：未在最新协同持股列表中匹配到。")
+                lines.append(
+                    f"- {label}：未在最新协同持股列表中匹配到（该列表只含各机构前十大持仓，未匹配不等于未持有）。"
+                )
+        lines.append("- 口径提示：季度披露、按机构产品列示，不能当作近期增减持动作。")
     else:
         lines.append(
             "- 未启用深度扫描；加 `--deep` 可扫描社保/QFII 协同持股列表（较慢）。"
